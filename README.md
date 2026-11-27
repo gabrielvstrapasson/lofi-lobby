@@ -66,6 +66,7 @@ Open the URL, pick a trainer and press **enter the room**: the click is what let
 | Day / night / auto | Client-side 3-state switch (`night`, `day`, `auto`): 10-minute keyframed cycle (`DEFAULT_CYCLE_MS` in `src/main.js`), persisted in `localStorage`; dev-only module in `src/cycle-debug.js` | [ADR 008](docs/adr/008-client-side-day-night-cycle.md) |
 | Town cats | Five clock-synced procedural cats roaming a whole-town BFS NavGrid (`src/cat.js`), fed with `E`, with DO heartbeat lottery for head-perching (`worker/index.js`) | [ADR 009](docs/adr/009-free-roaming-town-cats-and-head-perching.md) |
 | Debug hub | Single dev-only `import.meta.env.DEV` hub (`src/debug.js`) behind one toolbar bug button, hosting modular debug views (`src/cat-debug.js`, `src/cycle-debug.js`) and stripped from production builds | [ADR 010](docs/adr/010-dev-only-modular-debug-hub.md) |
+| Carousel | Built in code where pines are taken out of the town as it loads; turned by the room's clock (`roomNow()`), so its horses are just seats 16..23 and riding sends no messages; nothing that turns casts a shadow | [ADR 011](docs/adr/011-christmas-carousel.md) |
 | Message wall | Notes go over HTTP (`/api/notes`), not the WebSocket, and live in the room object's storage: **one key per note**, so the wall has no size limit and is read a page at a time | [SECURITY.md](SECURITY.md) |
 | Admin | Secret `ADMIN_PASSWORD`, checked in the room object in constant time, few tries per connection | [SECURITY.md](SECURITY.md) |
 

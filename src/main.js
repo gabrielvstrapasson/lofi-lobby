@@ -8,6 +8,7 @@ import { addSitFrames, sitFramePos } from "./ground-sit.js";
 import { createCapybara, CAPY_NEAR, CAPY_RADIUS, PHRASES as CAPY_PHRASES } from "./capybara.js";
 import { createFishing, createFishingGear, FISH_NEAR, FISH_LEAVE } from "./fishing.js";
 import { createCat, CATS, CAT_NEAR, CAT_SIT_MS, CAT_RIDE_MS, PHRASES as CAT_PHRASES, RIDE_PHRASES as CAT_RIDE_PHRASES } from "./cat.js";
+import { CAROUSEL, carouselSeat, createCarousel, inClearing, isCarouselSeat, onCarousel } from "./carousel.js";
 
 // ---- Asset config (change here to use other files) ----
 const TOWN = {
@@ -301,10 +302,12 @@ function prepareTown(fbx) {
     fbx.position.z -= c.z;
     fbx.position.y -= box2.min.y;
     townBox = new THREE.Box3().setFromObject(fbx);
+    clearFairGround(fbx);
     scene.add(fbx);
     townMeshes = [];
     fbx.traverse((o) => o.isMesh && townMeshes.push(o));
     computePondBox();
+    placeFair(); // before the lamps, benches and capybara look for open ground around it
     fbx.traverse((o) => {
       if (o.isMesh && /mailbox|sign|fence/i.test(o.name))
         solidBoxes.push(new THREE.Box3().setFromObject(o));
@@ -323,6 +326,31 @@ function prepareTown(fbx) {
     markLampShadowsStale(); // the town, the lamps and everything around them just took their places
     buildCatNavGrid();
 }
+
+// ---- The fair: the carousel ----
+// The pines standing where the rides go (left of the pond, below the sand path) come out of the town
+// as it loads. Here, and not earlier or later: after the scaling and townBox (they stand on the
+// town's edge, so earlier would shrink or move the town), and before townMeshes, since a hidden
+// mesh would still block the way and hold up the ground (rays ignore visibility).
+function clearFairGround(root) {
+  const pines = [];
+  const at = new THREE.Vector3();
+  root.traverse((o) => {
+    if (!o.isMesh || !/tree/i.test(o.name)) return;
+    new THREE.Box3().setFromObject(o).getCenter(at);
+    if (inClearing(at.x, at.z)) pines.push(o);
+  });
+  for (const o of pines) o.removeFromParent();
+}
+const carousel = createCarousel();
+let fairPlaced = false;
+function placeFair() {
+  carousel.root.position.y = groundHeight(CAROUSEL.x, CAROUSEL.z);
+  if (!fairPlaced) scene.add(carousel.root);
+  fairPlaced = true;
+}
+// the seats on a ride: their spot comes from the clock, they need no message while it turns
+const isRideSeat = (id) => isCarouselSeat(id);
 
 // ---- Drawing the town in few draw calls ----
 // The town comes as ~1,300 meshes sharing one or a few materials, and each one would be a draw call
@@ -686,7 +714,7 @@ function createBench(x, y, z, face) {
   benchBoxes.push(box); // and it hides whoever stands behind it (updateOcclusion)
 }
 // Each bench goes on the open spot nearest its wish (spiral search), so a town with another
-// layout still gets them. Seats stay under MAX_SEATS (16 = 8 benches).
+// layout still gets them. Bench seats stay under 16 (8 benches): 16..23 are the carousel horses.
 function placeBenches() {
   const clear = (x, z) =>
     isOpen(x, z, 2.6) &&
@@ -719,6 +747,9 @@ const BENCH_SPOTS = [
 ];
 // Where a seat is, and which way the sitter looks (null if that bench doesn't exist)
 function seatSpot(id) {
+  // a carousel horse: where it is right now, by the room's clock
+  if (isCarouselSeat(id)) return fairPlaced ? carouselSeat(id - CAROUSEL.firstSeat, roomNow(), carousel.root.position.y) : null;
+  if (id >= benches.length * SEATS_PER_BENCH) return null;
   const b = benches[id >> 1];
   if (!b) return null;
   const [fx, fz] = FACING[b.face];
@@ -1516,7 +1547,7 @@ function groundHeight(x, z) {
 // A point is "open" if the ground is flat within radius r (nothing tall nearby)
 function isOpen(x, z, r) {
   // a lamp post doesn't sit right next to a mailbox/sign/fence or in the pond
-  if (insideSolid(x, z, r + 1.5) || inPond(x, z)) return false;
+  if (insideSolid(x, z, r + 1.5) || inPond(x, z) || onCarousel(x, z, r + 1.5)) return false;
   const y = groundHeight(x, z);
   for (let a = 0; a < 8; a++) {
     const ang = (a / 8) * Math.PI * 2;
@@ -1745,6 +1776,7 @@ function buildCatNavGrid() {
     )
       return false;
     if (insideSolid(x, z, BODY_RADIUS * 0.9, BODY_RADIUS * 1.7)) return false;
+    if (onCarousel(x, z, BODY_RADIUS)) return false; // cats walk around the carousel, not through it
     if (
       inPond(x, z) ||
       inPond(x - BODY_RADIUS, z) ||
@@ -2207,6 +2239,7 @@ function isFree(x, z, currentY) {
   )
     return false;
   if (insideSolid(x, z, BODY_RADIUS * 0.8, BODY_RADIUS * 1.6)) return false;
+  if (onCarousel(x, z, BODY_RADIUS * 0.5)) return false; // round, so not a box: you can walk all around it
   // pond: straight box (with the body width), not following the irregular stones
   if (
     inPond(x - BODY_RADIUS, z) ||
@@ -2916,11 +2949,14 @@ const seatTaken = (id) => [...others.values()].some((o) => o.seat === id);
 function nearestFreeSeat() {
   let best = -1,
     bestD = SIT_RANGE;
-  for (let id = 0; id < benches.length * SEATS_PER_BENCH; id++) {
+  const consider = (id) => {
     const s = seatSpot(id);
+    if (!s) return;
     const d = Math.hypot(s.x - pos.x, s.z - pos.z);
     if (d < bestD && !seatTaken(id)) (best = id), (bestD = d);
-  }
+  };
+  for (let id = 0; id < benches.length * SEATS_PER_BENCH; id++) consider(id);
+  for (let i = 0; i < CAROUSEL.seats; i++) consider(CAROUSEL.firstSeat + i);
   return best;
 }
 function sit(id) {
@@ -2937,6 +2973,7 @@ function sit(id) {
 // Stand up on the nearest free spot around the bench, starting from the way you walked off
 // (or its front), then tell the room
 function standUp(notify = true, way = null) {
+  if (isCarouselSeat(mySeat)) return getOffCarousel(notify);
   const s = seatSpot(mySeat);
   const side = mySeat & 1 ? 1 : -1;
   mySeat = -1;
@@ -2952,6 +2989,29 @@ function standUp(notify = true, way = null) {
         const a = front + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (Math.PI / 8);
         const x = s.x + Math.cos(a) * d,
           z = s.z + Math.sin(a) * d;
+        if (isFree(x, z, ground)) {
+          const [ox, oz] = [pos.x, pos.z];
+          pos.set(x, ground, z);
+          glideFrom(ox, oz);
+          break search;
+        }
+      }
+  }
+  if (notify) sendSeat();
+}
+// Off a horse: onto the grass just outside the base, beside where the horse is now, then further
+// around it (another rider may be getting off there too)
+function getOffCarousel(notify) {
+  const s = seatSpot(mySeat);
+  mySeat = -1;
+  if (s) {
+    const from = Math.atan2(s.x - CAROUSEL.x, s.z - CAROUSEL.z); // its angle, as carouselSeat measures it
+    search: for (let d = CAROUSEL.base + 1; d <= CAROUSEL.base + 4; d += 0.5)
+      for (let i = 0; i < 24; i++) {
+        const a = from + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (Math.PI / 12);
+        const x = CAROUSEL.x + Math.sin(a) * d,
+          z = CAROUSEL.z + Math.cos(a) * d;
+        const ground = groundHeight(x, z);
         if (isFree(x, z, ground)) {
           const [ox, oz] = [pos.x, pos.z];
           pos.set(x, ground, z);
@@ -3464,6 +3524,7 @@ function updateOthers(dt) {
       m.position.set(seat.x, seat.y, seat.z);
       o.target.set(seat.x, 0, seat.z);
     } else m.position.y = topHeight(m.position.x, m.position.z);
+    m.castShadow = !isRideSeat(o.seat); // see the loop: riders cast no shadow
     m.rotation.copy(sprite.rotation);
     // running uses the run frames of the same sheet, like your own trainer (not on the code-drawn fallback)
     const running = o.run && !seat && o.cfg === CROP[o.gender];
@@ -4299,6 +4360,14 @@ function loop() {
   }
   const run = keys.shift || stick.mag > 0.9;
   if (mySeat >= 0 && (dx || dz)) standUp(true, [dx, dz]); // any move key gets you up, off that way
+  const riding = isRideSeat(mySeat);
+  if (riding) {
+    // the horse carries you round: follow it, facing the way it goes
+    const s = seatSpot(mySeat);
+    pos.x = s.x;
+    pos.z = s.z;
+    dir = s.dir;
+  }
   const walking = dx || dz;
   if (walking) {
     const n = Math.hypot(dx, dz);
@@ -4315,7 +4384,8 @@ function loop() {
   if (onGround && walking) setGround(false); // moving gets you up
   const grounded = onGround && setSitFrameTex(sheetTex, dir); // facing the way you stood
   if (!grounded) setFrame(dir, currentStep, running);
-  sendPosition(now, currentStep, running);
+  // a rider's spot comes from the seat and the clock in every browser: nothing to send while it turns
+  if (!riding) sendPosition(now, currentStep, running);
   const freeSeat = mySeat >= 0 ? -1 : nearestFreeSeat();
   eNow = eAction(freeSeat);
   updateHoldButton();
@@ -4344,7 +4414,12 @@ function loop() {
   sprite.rotation.set(camera.rotation.x * 0.5, 0, 0);
   showHeld(myHeld, sprite, CHARACTER.cfg, myHold, grounded ? null : heldDir(myHold, mySeat >= 0 ? seatSpot(mySeat) : null, !walking, dir));
 
-  updateLampShadows([sprite, capy.mesh, ...cats.map((c) => c.mesh), ...[...others.values()].map((o) => o.mesh)]);
+  carousel.update(roomNow(), dayAmount);
+  // Riders cast no shadow and are no lamp's concern: the lamp by the pond reaches the carousel, and
+  // someone going round would make it redraw its 6 shadow passes every frame, all night
+  sprite.castShadow = !riding;
+  const movers = [...others.values()].filter((o) => !isRideSeat(o.seat)).map((o) => o.mesh);
+  updateLampShadows([...(riding ? [] : [sprite]), capy.mesh, ...cats.map((c) => c.mesh), ...movers]);
   renderer.render(scene, camera);
   updateNameTags();
   updateBubbles();
